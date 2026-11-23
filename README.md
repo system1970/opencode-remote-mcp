@@ -16,7 +16,7 @@ OpenCode (edits, shell, tests, skills — also visible live in OpenCode Desktop)
 
 ## Quickstart (Gemini Web)
 
-1. **Make sure OpenCode is running locally** (`opencode serve` or OpenCode Desktop) and [Bun](https://bun.sh) is installed.
+1. **Prerequisites:** Make sure [OpenCode](https://opencode.ai) is running locally (`opencode serve` or OpenCode Desktop), [Bun](https://bun.sh) is installed, and you have a tunnel CLI — [OpenTunnel](https://opentunnel.xyz) (recommended for a persistent URL: `curl -fsSL https://opentunnel.xyz/install | sh`) or `cloudflared` (or pass `--no-tunnel`).
 2. **Start the bridge** pointing at your projects folder (not published to npm yet, so run via GitHub):
    ```bash
    bunx github:system1970/opencode-remote-mcp --root ~/Projects
@@ -27,7 +27,7 @@ OpenCode (edits, shell, tests, skills — also visible live in OpenCode Desktop)
    ```
    Optionally pin a workhorse model:
    ```bash
-   bunx opencode-remote-mcp --root ~/Projects --model opencode-go/muse-spark-1.3-contributor
+   bunx github:system1970/opencode-remote-mcp --root ~/Projects --model opencode-go/muse-spark-1.3-contributor
    ```
 3. **Connect in Gemini Web:**
    - Open `https://gemini.google.com/devmode` (or **Settings → Connected Apps → Add a custom app**).
@@ -45,7 +45,7 @@ OpenCode (edits, shell, tests, skills — also visible live in OpenCode Desktop)
 | `repo_diff` | Read-only | Inspect working-tree or staged `git diff` |
 | `opencode_sessions` | Read-only | List OpenCode projects and recent/active sessions |
 | `opencode_poll` | Read-only | Check session status (`running` / `completed` / `needs_permission`), reply, and diff |
-| `opencode_dispatch` | Action | Start or continue an OpenCode session (waits ~25s, then returns `running` + `session_id` to avoid HTTP timeouts) |
+| `opencode_dispatch` | Action | Start or continue an OpenCode session (waits ~12s, then returns `running` + `session_id` to avoid HTTP timeouts) |
 | `opencode_interrupt` | Action | Abort a running OpenCode session |
 
 ## CLI Options
