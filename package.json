@@ -1,0 +1,36 @@
+{
+  "name": "opencode-remote-mcp",
+  "version": "0.1.0",
+  "description": "Zero-dependency StreamableHTTP MCP bridge for driving local OpenCode from Gemini Web, Gemini Mobile, and remote MCP clients.",
+  "type": "module",
+  "license": "MIT",
+  "homepage": "https://github.com/system1970/opencode-remote-mcp#readme",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/system1970/opencode-remote-mcp.git"
+  },
+  "files": [
+    "bin",
+    "src",
+    "assets",
+    "README.md",
+    "LICENSE"
+  ],
+  "bin": {
+    "opencode-remote-mcp": "./bin/opencode-remote-mcp.mjs"
+  },
+  "scripts": {
+    "start": "bun run src/cli.ts",
+    "test": "bun test"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "keywords": [
+    "opencode",
+    "mcp",
+    "gemini",
+    "streamable-http",
+    "remote"
+  ]
+}
