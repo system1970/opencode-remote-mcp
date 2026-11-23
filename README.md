@@ -2,6 +2,8 @@
 
 Zero-dependency **StreamableHTTP MCP** bridge that lets you drive your local [OpenCode](https://opencode.ai) instance from **Gemini Web**, **Gemini Mobile**, or any remote MCP client.
 
+![Gemini Web connected to opencode-remote-mcp](./assets/gemini-demo.jpg)
+
 ```text
 Gemini Web / Mobile (https://.../mcp/<secret>)
         │
