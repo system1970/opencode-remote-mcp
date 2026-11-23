@@ -111,8 +111,12 @@ describe("McpHttpServer", () => {
     const fwdJson = (await fwdInitRes.json()) as {
       result: { serverInfo: { icons?: Array<{ src: string }> } };
     };
-    expect(fwdJson.result.serverInfo.icons?.[0]?.src).toBe(
-      "https://demo.opentunnel.xyz/icon.png",
+    // Forwarded hosts and setPublicUrl() used to yield https:// icon URLs, but
+    // Gemini Web CSP blocks arbitrary https: hosts (img-src allows Google
+    // hosts + data:/blob: only), so initialize always returns the embedded
+    // data: URI now.
+    expect(fwdJson.result.serverInfo.icons?.[0]?.src.startsWith("data:image/png;base64,")).toBe(
+      true,
     );
 
     const listRes = await fetch(`${baseUrl}/mcp/${SECRET}`, {
@@ -124,6 +128,21 @@ describe("McpHttpServer", () => {
       result: { tools: Array<{ name: string }> };
     };
     expect(listJson.result.tools.map((t) => t.name)).toEqual(["ping_tool"]);
+
+    for (const [m, key] of [
+      ["resources/list", "resources"],
+      ["resources/templates/list", "resourceTemplates"],
+      ["prompts/list", "prompts"],
+    ] as const) {
+      const r = await fetch(`${baseUrl}/mcp/${SECRET}`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ jsonrpc: "2.0", id: 20, method: m }),
+      });
+      expect(r.status).toBe(200);
+      const j = (await r.json()) as { result: Record<string, unknown[]> };
+      expect(j.result[key]).toEqual([]);
+    }
 
     const callRes = await fetch(`${baseUrl}/mcp/${SECRET}`, {
       method: "POST",
@@ -142,7 +161,140 @@ describe("McpHttpServer", () => {
     expect(callJson.result.content[0]?.text).toContain('"ok": true');
   });
 
-  test("uses setPublicUrl icon when no forwarded host is present", async () => {
+  test("echoes mcp-session-id on tools/list and tools/call", async () => {
+    const headers = {
+      "content-type": "application/json",
+      authorization: "Bearer bearer-xyz",
+      "mcp-session-id": "test-session-123",
+    };
+
+    const listRes = await fetch(`${baseUrl}/mcp/${SECRET}`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ jsonrpc: "2.0", id: 100, method: "tools/list" }),
+    });
+    expect(listRes.status).toBe(200);
+    expect(listRes.headers.get("mcp-session-id")).toBe("test-session-123");
+
+    const callRes = await fetch(`${baseUrl}/mcp/${SECRET}`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 101,
+        method: "tools/call",
+        params: { name: "ping_tool", arguments: {} },
+      }),
+    });
+    expect(callRes.status).toBe(200);
+    expect(callRes.headers.get("mcp-session-id")).toBe("test-session-123");
+
+    const unknownRes = await fetch(`${baseUrl}/mcp/${SECRET}`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 102,
+        method: "tools/call",
+        params: { name: "no_such_tool", arguments: {} },
+      }),
+    });
+    expect(unknownRes.status).toBe(200);
+    expect(unknownRes.headers.get("mcp-session-id")).toBe("test-session-123");
+
+    // Error case: handler throws, session id must still be echoed.
+    const errServer = new McpHttpServer({
+      port: 0,
+      secret: SECRET,
+      bearerToken: "bearer-xyz",
+      tools: [
+        {
+          name: "boom",
+          description: "Always fails",
+          inputSchema: { type: "object", properties: {} },
+          handler: async () => {
+            throw new Error("kaboom");
+          },
+        },
+      ],
+    });
+    const errPort = await errServer.start();
+    try {
+      const errRes = await fetch(`http://127.0.0.1:${errPort}/mcp/${SECRET}`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 103,
+          method: "tools/call",
+          params: { name: "boom", arguments: {} },
+        }),
+      });
+      expect(errRes.status).toBe(200);
+      expect(errRes.headers.get("mcp-session-id")).toBe("test-session-123");
+      const errJson = (await errRes.json()) as {
+        result: { isError: boolean };
+      };
+      expect(errJson.result.isError).toBe(true);
+    } finally {
+      await errServer.stop();
+    }
+  });
+
+  test("/.well-known/oauth-protected-resource/mcp/<secret> 404s without leaking the secret", async () => {
+    const chunks: string[] = [];
+    const origWrite = process.stderr.write.bind(process.stderr);
+    (process.stderr as unknown as { write: (...a: unknown[]) => boolean }).write =
+      ((chunk: unknown, ...rest: unknown[]) => {
+        chunks.push(String(chunk));
+        return (origWrite as (...a: unknown[]) => boolean)(chunk, ...rest);
+      }) as typeof process.stderr.write;
+    try {
+      const r = await fetch(
+        `${baseUrl}/.well-known/oauth-protected-resource/mcp/${SECRET}`,
+      );
+      expect(r.status).toBe(404);
+    } finally {
+      process.stderr.write = origWrite;
+    }
+    const logged = chunks.join("");
+    expect(logged).not.toContain(SECRET);
+    expect(logged).toContain("/mcp/<redacted>");
+  });
+
+  test("initialize stderr log includes redacted icon src", async () => {
+    const chunks: string[] = [];
+    const origWrite = process.stderr.write.bind(process.stderr);
+    (process.stderr as unknown as { write: (...a: unknown[]) => boolean }).write =
+      ((chunk: unknown, ...rest: unknown[]) => {
+        chunks.push(String(chunk));
+        return (origWrite as (...a: unknown[]) => boolean)(chunk, ...rest);
+      }) as typeof process.stderr.write;
+    try {
+      const res = await fetch(`${baseUrl}/mcp/${SECRET}`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: "Bearer bearer-xyz",
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 200,
+          method: "initialize",
+          params: { protocolVersion: "2025-11-25" },
+        }),
+      });
+      expect(res.status).toBe(200);
+    } finally {
+      process.stderr.write = origWrite;
+    }
+    const logged = chunks.join("");
+    expect(logged).toContain("[mcp] initialize (");
+    expect(logged).toContain("icon=data:image/png;base64,...");
+    expect(logged).not.toContain("data:image/png;base64,iVBOR");
+  });
+
+  test("setPublicUrl still yields embedded data: icon (Gemini CSP-safe)", async () => {
     const s2 = new McpHttpServer({
       port: 0,
       secret: SECRET,
@@ -166,8 +318,8 @@ describe("McpHttpServer", () => {
       const json = (await res.json()) as {
         result: { serverInfo: { icons?: Array<{ src: string }> } };
       };
-      expect(json.result.serverInfo.icons?.[0]?.src).toBe(
-        "https://tunnel.example.com/icon.png",
+      expect(json.result.serverInfo.icons?.[0]?.src.startsWith("data:image/png;base64,")).toBe(
+        true,
       );
     } finally {
       await s2.stop();

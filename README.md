@@ -16,10 +16,14 @@ OpenCode (edits, shell, tests, skills — also visible live in OpenCode Desktop)
 
 ## Quickstart (Gemini Web)
 
-1. **Make sure OpenCode is running locally** (`opencode serve` or OpenCode Desktop).
-2. **Start the bridge** pointing at your projects folder:
+1. **Make sure OpenCode is running locally** (`opencode serve` or OpenCode Desktop) and [Bun](https://bun.sh) is installed.
+2. **Start the bridge** pointing at your projects folder (not published to npm yet, so run via GitHub):
    ```bash
-   bunx opencode-remote-mcp --root ~/Projects
+   bunx github:system1970/opencode-remote-mcp --root ~/Projects
+   ```
+   Or from a local checkout:
+   ```bash
+   bun run src/cli.ts --root ~/Projects
    ```
    Optionally pin a workhorse model:
    ```bash
@@ -75,3 +79,7 @@ If you want a permanent URL across Gemini Web and Mobile without re-pasting on r
 ## License
 
 MIT
+
+---
+
+Part of the [agent-webmcp](https://github.com/orkestrate-dot-space/agent-webmcp) ecosystem — see [orkestrate.space](https://orkestrate.space) for more.

@@ -1,6 +1,7 @@
 import { randomUUID, timingSafeEqual } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
+import { gunzipSync, inflateSync } from "node:zlib";
 
 const ICON_PNG: Buffer | undefined = (() => {
   try {
@@ -54,7 +55,7 @@ const SUPPORTED_PROTOCOL_VERSIONS = [
   "2025-03-26",
   "2024-11-05",
 ] as const;
-const DEFAULT_PROTOCOL_VERSION = "2025-03-26";
+const DEFAULT_PROTOCOL_VERSION = "2025-11-25";
 const MAX_BODY_BYTES = 2 * 1024 * 1024;
 
 function safeEqual(a: string, b: string): boolean {
@@ -104,7 +105,19 @@ function readBody(req: IncomingMessage): Promise<string> {
     req.on("end", () => {
       if (!settled) {
         settled = true;
-        resolve(Buffer.concat(chunks).toString("utf8"));
+        try {
+          const raw = Buffer.concat(chunks);
+          const enc = String(req.headers["content-encoding"] ?? "").toLowerCase().trim();
+          const buf =
+            enc === "gzip"
+              ? gunzipSync(raw)
+              : enc === "deflate"
+                ? inflateSync(raw)
+                : raw;
+          resolve(buf.toString("utf8"));
+        } catch (err) {
+          reject(err);
+        }
       }
     });
     req.on("error", (err) => {
@@ -119,7 +132,6 @@ function readBody(req: IncomingMessage): Promise<string> {
 export class McpHttpServer {
   private server: Server | undefined;
   private boundPort = 0;
-  private publicUrl?: string;
   private readonly toolMap = new Map<string, McpToolDefinition>();
 
   constructor(private readonly options: McpHttpServerOptions) {
@@ -128,28 +140,18 @@ export class McpHttpServer {
     }
   }
 
-  setPublicUrl(url: string): void {
-    this.publicUrl = url.replace(/\/+$/, "");
+  setPublicUrl(_url: string): void {
+    // Retained for backwards compatibility (cli.ts calls it with the tunnel
+    // URL). Icons are always embedded as data: URIs for Gemini Web CSP, so
+    // there is nothing to store.
   }
 
-  private resolveIconSrc(req: IncomingMessage): string | undefined {
-    if (!ICON_PNG) return undefined;
-    const forwarded =
-      typeof req.headers["x-forwarded-host"] === "string"
-        ? req.headers["x-forwarded-host"].split(",")[0]?.trim()
-        : undefined;
-    const hostHeader =
-      forwarded ||
-      (typeof req.headers.host === "string" ? req.headers.host.trim() : undefined);
-    if (
-      hostHeader &&
-      !/^(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$/i.test(hostHeader)
-    ) {
-      return `https://${hostHeader}/icon.png`;
-    }
-    if (this.publicUrl) {
-      return `${this.publicUrl}/icon.png`;
-    }
+  private resolveIconSrc(_req?: IncomingMessage): string | undefined {
+    // Gemini Web enforces a restrictive img-src CSP (Google hosts + data:/blob:
+    // only), so arbitrary https:// icon URLs are blocked with
+    // "violates the following Content Security Policy directive: img-src ...".
+    // Always return the embedded data: URI, which is CSP-allowed and avoids an
+    // extra fetch. /icon.png is still served for clients that prefer a URL.
     return ICON_DATA_URI;
   }
 
@@ -232,13 +234,14 @@ export class McpHttpServer {
 
     const rawUrl = req.url ?? "/";
     const pathname = new URL(rawUrl, "http://127.0.0.1").pathname;
+    const normalizedPath = pathname.replace(/\/+$/, "") || "/";
 
     if (
       ICON_PNG &&
       (req.method === "GET" || req.method === "HEAD") &&
-      (pathname === "/favicon.ico" ||
-        pathname === "/favicon.png" ||
-        pathname === "/icon.png")
+      (normalizedPath === "/favicon.ico" ||
+        normalizedPath === "/favicon.png" ||
+        normalizedPath === "/icon.png")
     ) {
       res.writeHead(200, {
         "content-type": "image/png",
@@ -251,10 +254,16 @@ export class McpHttpServer {
       return;
     }
 
-    if (!safeEqual(pathname, this.path)) {
+    if (!safeEqual(normalizedPath, this.path)) {
+      const safePath = normalizedPath.replace(/\/mcp\/[^/]+/g, "/mcp/<redacted>");
+      process.stderr.write(`[mcp] ${req.method ?? "?"} ${safePath} -> 404\n`);
       writeJson(res, 404, { error: "Not found" });
       return;
     }
+
+    process.stderr.write(
+      `[mcp] <-- ${req.method ?? "?"} /mcp/<secret> accept=${req.headers.accept ?? "-"} ce=${req.headers["content-encoding"] ?? "-"}\n`,
+    );
 
     if (this.options.bearerToken) {
       const auth = req.headers.authorization ?? "";
@@ -271,6 +280,7 @@ export class McpHttpServer {
     }
 
     if (req.method === "GET") {
+      process.stderr.write(`[mcp] GET -> 405\n`);
       writeJson(res, 405, {
         jsonrpc: "2.0",
         id: null,
@@ -280,11 +290,13 @@ export class McpHttpServer {
     }
 
     if (req.method === "DELETE") {
+      process.stderr.write(`[mcp] DELETE -> 200\n`);
       writeJson(res, 200, { ok: true });
       return;
     }
 
     if (req.method !== "POST") {
+      process.stderr.write(`[mcp] ${req.method ?? "?"} -> 405\n`);
       writeJson(res, 405, { error: "Method not allowed" });
       return;
     }
@@ -293,12 +305,14 @@ export class McpHttpServer {
     try {
       rawBody = await readBody(req);
     } catch (err) {
+      const msg = err instanceof Error ? err.message : "Invalid body";
+      process.stderr.write(`[mcp] body error -> 413: ${msg}\n`);
       writeJson(res, 413, {
         jsonrpc: "2.0",
         id: null,
         error: {
           code: -32600,
-          message: err instanceof Error ? err.message : "Invalid body",
+          message: msg,
         },
       });
       return;
@@ -308,6 +322,7 @@ export class McpHttpServer {
     try {
       msg = JSON.parse(rawBody) as JsonRpcRequest;
     } catch {
+      process.stderr.write(`[mcp] parse error -> 400 (len=${rawBody.length})\n`);
       writeJson(res, 400, {
         jsonrpc: "2.0",
         id: null,
@@ -318,6 +333,7 @@ export class McpHttpServer {
 
     // JSON-RPC notifications have no id
     if (msg.id === undefined) {
+      process.stderr.write(`[mcp] notification ${msg.method ?? "(unknown)"} -> 202\n`);
       res.writeHead(202, {
         "access-control-allow-origin": "*",
         "content-length": "0",
@@ -332,6 +348,9 @@ export class McpHttpServer {
       typeof req.headers["mcp-session-id"] === "string"
         ? req.headers["mcp-session-id"]
         : undefined;
+    const sessionExtra: Record<string, string> = sessionHeader
+      ? { "mcp-session-id": sessionHeader }
+      : {};
 
     if (method === "initialize") {
       const requestedVersion =
@@ -344,9 +363,15 @@ export class McpHttpServer {
         ? requestedVersion
         : DEFAULT_PROTOCOL_VERSION;
       const sessionId = sessionHeader ?? randomUUID();
+      const iconSrc = this.resolveIconSrc(req);
+      const iconLog = !iconSrc
+        ? "-"
+        : iconSrc.startsWith("data:")
+          ? "data:image/png;base64,..."
+          : iconSrc;
 
       process.stderr.write(
-        `[mcp] initialize (${protocolVersion}, ${Date.now() - startedAt}ms)\n`,
+        `[mcp] initialize (${protocolVersion}, ${Date.now() - startedAt}ms, icon=${iconLog})\n`,
       );
       writeJson(
         res,
@@ -363,11 +388,11 @@ export class McpHttpServer {
               name: this.options.serverName ?? "opencode-remote-mcp",
               title: "OpenCode Remote MCP",
               version: this.options.serverVersion ?? "0.1.0",
-              ...(this.resolveIconSrc(req)
+              ...(iconSrc
                 ? {
                     icons: [
                       {
-                        src: this.resolveIconSrc(req)!,
+                        src: iconSrc,
                         mimeType: "image/png",
                         sizes: ["128x128"],
                       },
@@ -385,8 +410,28 @@ export class McpHttpServer {
       return;
     }
 
-    if (method === "ping" || method === "server/discover") {
-      writeJson(res, 200, { jsonrpc: "2.0", id: msg.id, result: {} });
+    if (method === "ping" || method === "server/discover" || method === "logging/setLevel") {
+      writeJson(res, 200, { jsonrpc: "2.0", id: msg.id, result: {} }, sessionExtra);
+      return;
+    }
+
+    if (method === "resources/list") {
+      writeJson(res, 200, { jsonrpc: "2.0", id: msg.id, result: { resources: [] } }, sessionExtra);
+      return;
+    }
+
+    if (method === "resources/templates/list") {
+      writeJson(
+        res,
+        200,
+        { jsonrpc: "2.0", id: msg.id, result: { resourceTemplates: [] } },
+        sessionExtra,
+      );
+      return;
+    }
+
+    if (method === "prompts/list") {
+      writeJson(res, 200, { jsonrpc: "2.0", id: msg.id, result: { prompts: [] } }, sessionExtra);
       return;
     }
 
@@ -394,18 +439,23 @@ export class McpHttpServer {
       process.stderr.write(
         `[mcp] tools/list (${this.options.tools.length} tools, ${Date.now() - startedAt}ms)\n`,
       );
-      writeJson(res, 200, {
-        jsonrpc: "2.0",
-        id: msg.id,
-        result: {
-          tools: this.options.tools.map((t) => ({
-            name: t.name,
-            description: t.description,
-            inputSchema: t.inputSchema,
-            ...(t.annotations ? { annotations: t.annotations } : {}),
-          })),
+      writeJson(
+        res,
+        200,
+        {
+          jsonrpc: "2.0",
+          id: msg.id,
+          result: {
+            tools: this.options.tools.map((t) => ({
+              name: t.name,
+              description: t.description,
+              inputSchema: t.inputSchema,
+              ...(t.annotations ? { annotations: t.annotations } : {}),
+            })),
+          },
         },
-      });
+        sessionExtra,
+      );
       return;
     }
 
@@ -414,11 +464,16 @@ export class McpHttpServer {
       const toolName = typeof params.name === "string" ? params.name : "";
       const tool = this.toolMap.get(toolName);
       if (!tool) {
-        writeJson(res, 200, {
-          jsonrpc: "2.0",
-          id: msg.id,
-          error: { code: -32602, message: `Unknown tool: ${toolName}` },
-        });
+        writeJson(
+          res,
+          200,
+          {
+            jsonrpc: "2.0",
+            id: msg.id,
+            error: { code: -32602, message: `Unknown tool: ${toolName}` },
+          },
+          sessionExtra,
+        );
         return;
       }
 
@@ -443,27 +498,37 @@ export class McpHttpServer {
         process.stderr.write(
           `[mcp] tools/call ${toolName} (${Date.now() - startedAt}ms)\n`,
         );
-        writeJson(res, 200, {
-          jsonrpc: "2.0",
-          id: msg.id,
-          result: {
-            content: [{ type: "text", text }],
-            isError: false,
+        writeJson(
+          res,
+          200,
+          {
+            jsonrpc: "2.0",
+            id: msg.id,
+            result: {
+              content: [{ type: "text", text }],
+              isError: false,
+            },
           },
-        });
+          sessionExtra,
+        );
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         process.stderr.write(
           `[mcp] tools/call ${toolName} ERROR: ${message} (${Date.now() - startedAt}ms)\n`,
         );
-        writeJson(res, 200, {
-          jsonrpc: "2.0",
-          id: msg.id,
-          result: {
-            content: [{ type: "text", text: `Error: ${message}` }],
-            isError: true,
+        writeJson(
+          res,
+          200,
+          {
+            jsonrpc: "2.0",
+            id: msg.id,
+            result: {
+              content: [{ type: "text", text: `Error: ${message}` }],
+              isError: true,
+            },
           },
-        });
+          sessionExtra,
+        );
       } finally {
         req.off("close", onClose);
         res.off("close", onClose);
@@ -471,10 +536,11 @@ export class McpHttpServer {
       return;
     }
 
+    process.stderr.write(`[mcp] unknown method ${method} -> -32601\n`);
     writeJson(res, 200, {
       jsonrpc: "2.0",
       id: msg.id,
       error: { code: -32601, message: `Method not found: ${method}` },
-    });
+    }, sessionExtra);
   }
 }
