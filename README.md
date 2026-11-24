@@ -77,6 +77,7 @@ If you want a permanent URL across Gemini Web and Mobile without re-pasting on r
 - Requires a 256-bit secret URL path (`/mcp/<secret>`) compared in constant time; all other paths return `404`.
 - All `repo_*` tools enforce `realpath` containment within `--root` (blocking `..` and symlink escapes).
 - Built-in MCP instructions tell the model never to `git push` unless explicitly asked.
+- **Gemini Web privacy (personal Google accounts):** If **Keep Activity** (formerly Gemini Apps Activity) is enabled at `https://myactivity.google.com/product/gemini`, excerpts and tool outputs returned to Gemini Web may be used for model improvement and human review. You can turn **Keep Activity** off there (Google still retains chats for up to 72 hours for safety, and turning it off disables chat history and may restrict some Connected Apps — verify your custom MCP connector still works after toggling, or use Temporary Chat and scope `--root` to non-sensitive repos).
 
 ## License
 
